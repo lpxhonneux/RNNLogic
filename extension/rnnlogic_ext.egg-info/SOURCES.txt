@@ -1,0 +1,7 @@
+pyrnnlogic.cpp
+rnnlogic.cpp
+setup.py
+rnnlogic_ext.egg-info/PKG-INFO
+rnnlogic_ext.egg-info/SOURCES.txt
+rnnlogic_ext.egg-info/dependency_links.txt
+rnnlogic_ext.egg-info/top_level.txt

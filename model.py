@@ -11,18 +11,23 @@ from torch_sparse import spmm
 from dataloader import TrainDataset, TestDataset, RuleDataset, Iterator
 import rnnlogic_ext
 
+import matplotlib.pyplot as plt
+import seaborn as sns
+
 class ReasoningPredictor(torch.nn.Module):
-    def __init__(self, args, kg, all_rules):
+    def __init__(self, args, kg, all_rules, rule_counter):
         super(ReasoningPredictor, self).__init__()
         self.args = args
         self.kg = kg
 
         self.rules = all_rules
+        self.rule_counter = rule_counter
         print("Number of rules:", len(self.rules))
 
         self.num_entities = kg.entity_size
         self.num_relations = kg.relation_size
         self.num_rules = len(self.rules)
+        self.len_cutoff= 3
 
         self.rule_weights = nn.parameter.Parameter(torch.zeros(self.num_rules))
 
@@ -39,10 +44,14 @@ class ReasoningPredictor(torch.nn.Module):
 
         score = torch.zeros(self.kg.entity_size, all_r.size(0)).cuda()
         mask = torch.zeros(self.kg.entity_size, all_r.size(0)).cuda()
+        # have to sort them for this to work in one pass this makes this O(NlogN)
         for k, (r_head, r_body) in enumerate(self.rules):
             if r_head != query_r:
                 continue
             x = self.kg.grounding(all_h, r_head, r_body, updated_adjacency)
+            if self.rule_counter is not None:
+                self.rule_counter[tuple(r_body)] = self.rule_counter.get(tuple(r_body),1) \
+                                                    + x.sum().detach().cpu().numpy()
             score += x * self.rule_weights[k]
             mask += x
 
@@ -53,6 +62,9 @@ class ReasoningPredictor(torch.nn.Module):
         score = score.masked_fill(~mask, float('-inf'))
         
         return score, mask
+
+    def compress_rule(r_head, r_body, rule_counter):
+        return 
 
     def compute_H(self, all_h, all_r, edges_to_remove, target):
         query_r = all_r[0].item()
@@ -110,6 +122,13 @@ class ReasoningPredictor(torch.nn.Module):
             edges_to_remove = edges_to_remove.cuda()
 
             logits, mask = self.forward(all_h, all_r, edges_to_remove)
+
+            if step % (min(self.args.max_steps_per_iter, len(dataset))//10) == 0:
+                plt.figure()
+                g = sns.histplot(self.rule_counter.values(), log_scale=True)
+                g.axes.set_yscale('log')
+                plt.savefig(self.args.fig_path + f'/rule_count_hist{step}.png')
+                plt.close()
             if mask.sum().item() == 0:
                 continue
 
@@ -205,11 +224,11 @@ class ReasoningPredictor(torch.nn.Module):
         mrr /= len(ranks)
     
         print('Evaluation: ', len(ranks))
-        print('{:.6f}'.format(hit1))
-        print('{:.6f}'.format(hit3))
-        print('{:.6f}'.format(hit10))
-        print('{:.6f}'.format(mr))
-        print('{:.6f}'.format(mrr))
+        print('Hit 1 {:.6f}'.format(hit1))
+        print('Hit 3 {:.6f}'.format(hit3))
+        print('Hit 10 {:.6f}'.format(hit10))
+        print('MR {:.6f}'.format(mr))
+        print('MRR {:.6f}'.format(mrr))
 
 class RuleGenerator(torch.nn.Module):
     def __init__(self, num_relations, num_layers, embedding_dim, hidden_dim, cuda=True):
@@ -331,7 +350,7 @@ class RuleGenerator(torch.nn.Module):
         rule_set = set([tuple(rule) for rule in formatted_rules])
         formatted_rules = [list(rule) for rule in rule_set]
 
-        return formatted_rules
+        return formatted_rules, rule_set
 
     def next_relation_log_probability(self, seq):
         inputs = torch.LongTensor([seq])
@@ -391,7 +410,7 @@ class RuleGenerator(torch.nn.Module):
 
             print(f"beam_search |rules| = {len(found_rules)}")
             ret = [[len(rule) - 2] + rule[0:-1] + [score] for rule, score in found_rules]
-            return ret
+            return ret, {tuple(ls) for ls in ret}
 
 class RNNLogic:
     def __init__(self, args, graph):
@@ -404,11 +423,19 @@ class RNNLogic:
         self.train_dataset = TrainDataset(args, graph)
         self.test_dataset = TestDataset(args, graph, "test")
 
+        self.rule_cache = None
+        # two-level hash table rule head -> rule body -> freq.(grounding paths)
+        # cache miss concern!
+        self.rule_counter = dict()
+
     # Generate logic rules by sampling.
     def generate_rules(self):
         relation2rules = list()
         for r in range(self.num_relations):
-            rules = self.generator.sample(r, self.args.num_generated_rules, self.args.max_rule_length)
+            rules, rules_tuples = self.generator.sample(r, self.args.num_generated_rules, self.args.max_rule_length)
+            # merging dicts to ensure all rule bodies are initialised to 0
+            rules_tuples = { rule[2:-1] for rule in rules_tuples }
+            self.rule_counter = {**self.rule_counter, **dict.fromkeys(rules_tuples, 1)}
             relation2rules.append(rules)
         return relation2rules
 
@@ -416,19 +443,23 @@ class RNNLogic:
     def generate_best_rules(self):
         relation2rules = list()
         for r in range(self.num_relations):
-            rules = self.generator.beam_search(r, self.args.num_rules_for_test, self.args.max_rule_length)
+            rules, rules_tuples = self.generator.beam_search(r, self.args.num_rules_for_test, self.args.max_rule_length)
+            rules_tuples = { rule[2:-1] for rule in rules_tuples }
+            self.rule_counter = {**self.rule_counter, **dict.fromkeys(rules_tuples, 1)}
             relation2rules.append(rules)
         return relation2rules
 
     # Update the reasoning predictor with generated logic rules.
     def update_predictor(self, relation2rules):
         all_rules = list()
+        # this seems inefficient because you loop through all generates rules twice
         for relation, rules in enumerate(relation2rules):
             for rule in rules:
                 length = rule[0]
                 rule = [rule[1], [rule[2 + k] for k in range(length)]]
                 all_rules.append(rule)
-        self.predictor = ReasoningPredictor(self.args, self.graph, all_rules)
+        self.predictor = ReasoningPredictor(self.args, self.graph,
+                                            all_rules, self.rule_counter)
         self.predictor.train_model(self.train_dataset)
         #self.predictor.set_logic_rules(relation2rules)
         #self.predictor.train(self.args.predictor_learning_rate, self.args.predictor_weight_decay, self.args.predictor_temperature, self.args.predictor_portion, self.args.num_threads)

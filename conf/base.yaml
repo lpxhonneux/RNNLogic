@@ -1,0 +1,31 @@
+cuda: True # Use GPU
+data_path: .
+fig_path: '${home}figures'
+max_rule_length: 3
+num_generated_rules: 200
+num_important_rules: 10
+num_rules_for_test: 100
+prior_weight: 1.0
+num_threads: 10
+iterations: 10
+max_steps_per_iter: 10000
+remove_edges: True
+print_every: 1000
+
+miner_portion: 1.0
+
+predictor_learning_rate: 0.01
+predictor_weight_decay: 0.0005
+predictor_temperature: 100
+predictor_H_temperature: 1.0
+predictor_portion: 1.0
+predictor_batch_size: 16
+
+generator_embedding_dim: 512
+generator_hidden_dim: 256
+generator_layers: 1
+generator_batch_size: 1024
+generator_epochs: 10000
+generator_learning_rate: 0.001
+generator_tune_epochs: 100
+generator_tune_learning_rate: 0.00001
