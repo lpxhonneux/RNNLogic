@@ -1,0 +1,7 @@
+*.png
+outputs/
+*build/*
+venv/
+__pycache__/
+pyrnnlogiclib/build/
+extension/build/

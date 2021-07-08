@@ -1,0 +1,9 @@
+defaults:
+  - base
+  - machine
+
+data_path: ${home}data/kinship
+num_generated_rules: 2000
+num_rules_for_test: 200
+num_important_rules: 0
+prior_weight: 0.01
